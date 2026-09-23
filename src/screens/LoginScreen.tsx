@@ -47,12 +47,15 @@ export const LoginScreen: React.FC<Props> = ({ navigation }) => {
 
       const data = await response.json();
 
+      // console.log("Login Response Data:", data);
+
       if (response.ok && data.access_token) {
         await SecureStore.setItemAsync("userToken", data.access_token);
+        await SecureStore.setItemAsync("user", JSON.stringify(data));
         navigation.replace("Home");
       } else {
         Alert.alert("Error de acceso", data.message || "Credenciales inválidas.");
-        console.log("Error de acceso:", data.message || "Credenciales  inválidas.");
+        // console.log("Error de acceso:", data.message || "Credenciales  inválidas.");
       }
     } catch (error) {
       Alert.alert("Error", "No se pudo conectar con el servidor.");
