@@ -49,7 +49,9 @@ export const LoginScreen: React.FC<Props> = ({ navigation }) => {
 
       // console.log("Login Response Data:", data);
 
-      if (response.ok && data.access_token) {
+      if (response.ok && data.access_token && !["user", "admin"].includes(data.role)) {
+        Alert.alert("Acceso restringido", "Esta app es solo para el personal del local.");
+      } else if (response.ok && data.access_token) {
         await SecureStore.setItemAsync("userToken", data.access_token);
         await SecureStore.setItemAsync("user", JSON.stringify(data));
         navigation.replace("Home");

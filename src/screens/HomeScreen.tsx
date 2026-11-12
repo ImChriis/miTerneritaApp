@@ -23,6 +23,8 @@ type Props = NativeStackScreenProps<RootStackParamList, "Home">;
 interface EventItem {
   idEvents: number;
   name: string;
+  date?: string;
+  status?: number;
 }
 
 interface TicketDetail {
@@ -62,7 +64,32 @@ interface PaymentValidationData {
   agotada?: boolean;
   entradas: TicketDetail[];
   historial?: ScanHistory[];
+  buyerCedula?: string | null;
+  buyerPhone?: string | null;
+  montoPagado?: number;
+  consumo?: { nombre: string; cantidad: number; total: number }[];
 }
+
+/** Id de cada escaneo: si la red falla y se reintenta, el backend no descuenta dos veces. */
+// UUID v4: el backend lo exige (@IsUUID).
+const nuevoScanId = () =>
+  "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+  });
+
+/** Fecha local YYYY-MM-DD (hoy y mañana se comparan con la fecha del evento). */
+const fechaLocal = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+/** Una fila "etiqueta ... valor" de la ficha; no se muestra si no hay valor. */
+const Fila = ({ label, valor, fuerte }: { label: string; valor?: string | null; fuerte?: boolean }) =>
+  valor ? (
+    <View style={styles.fila}>
+      <Text style={styles.filaLabel} numberOfLines={1}>{label}</Text>
+      <Text style={[styles.filaValor, fuerte && styles.filaFuerte]} numberOfLines={2}>{valor}</Text>
+    </View>
+  ) : null;
 
 const Home: React.FC<Props> = ({ navigation }) => {
   const [userName, setUserName] = useState<string>("");
@@ -91,6 +118,7 @@ const Home: React.FC<Props> = ({ navigation }) => {
   const [invalidQRModalVisible, setInvalidQRModalVisible] = useState(false);
 
   const [QrToken, setQrToken] = useState<string | null>(null);
+  const scanIdRef = useRef<string>(nuevoScanId());
 
   const api: string = process.env.EXPO_PUBLIC_API_URL || "";
 
@@ -114,7 +142,7 @@ const Home: React.FC<Props> = ({ navigation }) => {
       const user = await SecureStore.getItemAsync("user");
       if (user) {
         const parsedUser = JSON.parse(user);
-        setUserName(parsedUser.name + " " + parsedUser.lastName || "Usuario");
+        setUserName(`${parsedUser.name ?? ""} ${parsedUser.lastName ?? ""}`.trim() || "Usuario");
       }
 
       try {
@@ -128,8 +156,13 @@ const Home: React.FC<Props> = ({ navigation }) => {
         });
 
         if (response.ok) {
-          const eventsData = await response.json();
-          setEvents(eventsData);
+          const eventsData: EventItem[] = await response.json();
+          const hoy = new Date();
+          const manana = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate() + 1);
+          const dias = [fechaLocal(hoy), fechaLocal(manana)];
+          setEvents(
+            eventsData.filter((e) => e.status === 1 && dias.includes(String(e.date ?? "").slice(0, 10)))
+          );
         } else {
           Alert.alert("Error", "No se pudieron obtener los eventos disponibles.");
         }
@@ -148,7 +181,7 @@ const Home: React.FC<Props> = ({ navigation }) => {
 
   const handleLogout = async () => {
     await SecureStore.deleteItemAsync("userToken");
-    await SecureStore.deleteItemAsync("userName");
+    await SecureStore.deleteItemAsync("user");
     navigation.replace("Login");
   };
 
@@ -162,6 +195,7 @@ const Home: React.FC<Props> = ({ navigation }) => {
     try {
       const token = await SecureStore.getItemAsync("userToken");
       setQrToken(result.data);
+      scanIdRef.current = nuevoScanId();
 
       const response = await fetch(`${api}/code/lookup`, {
         method: "POST",
@@ -264,21 +298,20 @@ const Home: React.FC<Props> = ({ navigation }) => {
           token: QrToken,
           idEvents: selectedEventId,
           entradas: entradasAProcesar,
+          scanId: scanIdRef.current,
         }),
       });
 
       if (response.ok) {
-        const totalProcesadas = getTotalSelectedCount();
-        setResultModalType(pendingAction === "Rechazado" ? "rechazado" : "aprobado");
-        setResultModalMessage(
-          pendingAction === "Rechazado"
-            ? `Se han rechazado ${totalProcesadas} entrada(s) correctamente.`
-            : `Se han aprobado ${totalProcesadas} entrada(s) correctamente.`
-        );
+        setResultModalType("aprobado");
+        setResultModalMessage(`Pasan ${getTotalSelectedCount()} entrada(s).`);
         setResultModalVisible(true);
       } else {
-        Alert.alert("Error", "Error al actualizar el estado.");
-        resetScanner();
+        const error = await response.json().catch(() => null);
+        const mensaje = Array.isArray(error?.message) ? error.message.join(", ") : error?.message;
+        setResultModalType("advertencia");
+        setResultModalMessage(mensaje || "No se pudo registrar el ingreso. Escanea de nuevo.");
+        setResultModalVisible(true);
       }
     } catch (error) {
       console.error("Error al actualizar status:", error);
@@ -512,11 +545,7 @@ const Home: React.FC<Props> = ({ navigation }) => {
             <Ionicons name="help-circle-outline" size={44} color="#22242e" style={{ marginBottom: 6 }} />
             <Text style={styles.confirmTitle}>¿Confirmar Acción?</Text>
             <Text style={styles.confirmMessage}>
-              ¿Estás seguro que deseas{" "}
-              <Text style={{ fontWeight: "bold", color: pendingAction === "Aprobado" ? "#4CAF50" : "#F44336" }}>
-                {pendingAction === "Aprobado" ? "APROBAR" : "RECHAZAR"}
-              </Text>{" "}
-              un total de <Text style={styles.bold}>{getTotalSelectedCount()}</Text> entrada(s)?
+              ¿Dejar pasar <Text style={styles.bold}>{getTotalSelectedCount()}</Text> entrada(s)?
             </Text>
 
             <View style={styles.buttonRow}>
@@ -617,26 +646,52 @@ const Home: React.FC<Props> = ({ navigation }) => {
             /* MODAL ESTÁNDAR PARA PROCESAR ENTRADAS DISPONIBLES */
             <View style={[styles.modalContent, { maxWidth: width * 0.92 }]}>
               <ScrollView style={{ width: "100%" }} showsVerticalScrollIndicator={false}>
-                <Text style={styles.modalTitle}>Detalles de la Compra</Text>
-
                 {modalData && (
                   <>
-                    <Text style={styles.modalInfoText}>
-                      <Text style={styles.bold}>Comprador:</Text> {modalData.buyerName}
-                    </Text>
-                    <Text style={styles.modalInfoText}>
-                      <Text style={styles.bold}>Email:</Text> {modalData.buyerEmail}
-                    </Text>
-                    <Text style={styles.modalInfoText}>
-                      <Text style={styles.bold}>Evento:</Text> {modalData.eventName}
-                    </Text>
-                    <Text style={styles.modalInfoText}>
-                      <Text style={styles.bold}>Fecha del evento:</Text> {formatDate(modalData.eventDate)}
+                    {/* Cabecera: quién es y cuántas le quedan */}
+                    <View style={styles.fichaHead}>
+                      <Text style={styles.fichaNombre} numberOfLines={2}>{modalData.buyerName}</Text>
+                      <View style={styles.fichaChip}>
+                        <Text style={styles.fichaChipText}>
+                          {modalData.restantes ?? 0}/{modalData.ticketCount} por pasar
+                        </Text>
+                      </View>
+                    </View>
+                    <Text style={styles.fichaEvento} numberOfLines={1}>
+                      {modalData.eventName} · {formatDate(modalData.eventDate)}
                     </Text>
 
-                    <View style={styles.divider} />
+                    {/* Cliente */}
+                    <View style={styles.tarjeta}>
+                      <Text style={styles.tarjetaTitulo}>Cliente</Text>
+                      <Fila label="Cédula" valor={modalData.buyerCedula} />
+                      <Fila label="Teléfono" valor={modalData.buyerPhone} />
+                      <Fila label="Correo" valor={modalData.buyerEmail} />
+                    </View>
 
-                    <Text style={styles.subtitle}>Selección de Entradas a Procesar:</Text>
+                    {/* Compra */}
+                    <View style={styles.tarjeta}>
+                      <Text style={styles.tarjetaTitulo}>Compra</Text>
+                      <Fila
+                        label="Pagado"
+                        valor={modalData.montoPagado !== undefined ? `$${modalData.montoPagado.toFixed(2)}` : null}
+                        fuerte
+                      />
+                      <Fila label="Documento" valor={modalData.noDocumento} />
+                      {modalData.entradas?.map((t) => (
+                        <Fila key={t.idTicket} label={t.tipo} valor={`${t.cantidad} entrada${t.cantidad === 1 ? "" : "s"}`} />
+                      ))}
+                      <Text style={styles.tarjetaSub}>Consumo</Text>
+                      {modalData.consumo?.length ? (
+                        modalData.consumo.map((c, i) => (
+                          <Fila key={i} label={`${c.cantidad} × ${c.nombre}`} valor={`$${c.total.toFixed(2)}`} />
+                        ))
+                      ) : (
+                        <Text style={styles.vacio}>Sin consumo pre-ordenado</Text>
+                      )}
+                    </View>
+
+                    <Text style={styles.subtitle}>¿Cuántas pasan ahora?</Text>
 
                     {modalData.entradas?.map((ticket) => {
                       const maxAvailable =
@@ -706,18 +761,17 @@ const Home: React.FC<Props> = ({ navigation }) => {
                   onPress={() => handleOpenConfirmation("Aprobado")}
                   disabled={getTotalSelectedCount() === 0}
                 >
-                  <Text style={styles.buttonActionText}>Aprobar</Text>
+                  <Text style={styles.buttonActionText}>Dejar pasar</Text>
                 </Pressable>
                 <Pressable
-                  style={[
-                    styles.actionButton,
-                    styles.rejectButton,
-                    getTotalSelectedCount() === 0 && styles.disabledButton,
-                  ]}
-                  onPress={() => handleOpenConfirmation("Rechazado")}
-                  disabled={getTotalSelectedCount() === 0}
+                  style={[styles.actionButton, styles.rejectButton]}
+                  onPress={() => {
+                    setModalVisible(false);
+                    setModalData(null);
+                    resetScanner();
+                  }}
                 >
-                  <Text style={styles.buttonActionText}>Rechazar</Text>
+                  <Text style={styles.buttonActionText}>Cancelar</Text>
                 </Pressable>
               </View>
             </View>
@@ -829,6 +883,19 @@ const styles = StyleSheet.create({
   bold: { fontWeight: "bold", color: "#111" },
   boldText: { fontWeight: "bold", color: "#22242e" },
   divider: { height: 1, backgroundColor: "#E0E0E0", width: "100%", marginVertical: 8 },
+  fichaHead: { width: "100%", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
+  fichaNombre: { flex: 1, fontSize: 18, fontWeight: "bold", color: "#22242e" },
+  fichaChip: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, backgroundColor: "#E8F5E9" },
+  fichaChipText: { fontSize: 12, fontWeight: "bold", color: "#2E7D32" },
+  fichaEvento: { width: "100%", marginTop: 2, marginBottom: 10, fontSize: 12, color: "#666" },
+  tarjeta: { width: "100%", marginBottom: 10, padding: 12, borderRadius: 10, backgroundColor: "#F5F6F8" },
+  tarjetaTitulo: { marginBottom: 6, fontSize: 11, fontWeight: "bold", letterSpacing: 0.8, color: "#888", textTransform: "uppercase" },
+  tarjetaSub: { marginTop: 8, marginBottom: 4, fontSize: 11, fontWeight: "bold", color: "#888" },
+  fila: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 12, paddingVertical: 4 },
+  filaLabel: { flexShrink: 1, fontSize: 13, color: "#555" },
+  filaValor: { flexShrink: 1, maxWidth: "62%", fontSize: 13, color: "#22242e", textAlign: "right" },
+  filaFuerte: { fontSize: 15, fontWeight: "bold" },
+  vacio: { fontSize: 12, fontStyle: "italic", color: "#999" },
 
   /* MODAL ESTILO ERROR / ADVERTENCIA CON VECTOR ICON */
   resultModalContent: { backgroundColor: "white", borderRadius: 12, padding: 20, width: "85%", alignItems: "center", borderWidth: 2 },
